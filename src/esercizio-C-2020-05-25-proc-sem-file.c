@@ -2,7 +2,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -16,248 +15,205 @@
 
 #define FILE_SIZE (1024*1024)
 #define N 4
+#define CHECK_ERR(a,msg) {if ((a) == -1) { perror((msg)); exit(EXIT_FAILURE); } }
+#define CHECK_ERR_MMAP(a,msg) {if ((a) == MAP_FAILED) { perror((msg)); exit(EXIT_FAILURE); } }
 
 sem_t * proc_sem;
 sem_t * mutex;
 
-void soluzione_A() {    //only using open(), lseek(), write()
-    int res;
-    int fd;
+void soluzioneA();
+void soluzioneB();
 
-    fd = open("outputA.txt", O_CREAT | O_TRUNC | O_RDWR,  S_IRUSR | S_IWUSR);
-    if(fd == -1) {
-        perror("open");
-        exit(EXIT_FAILURE);
-    }
+int main(int argc, char * argv[]){
+	int res;
 
-    //zeroing the file
-
-    res = ftruncate(fd, 0);
-    if(res == -1) {
-        perror("ftruncate");
-        exit(EXIT_FAILURE);
-    }
-
-    res = ftruncate(fd, FILE_SIZE);
-    if(res == -1) {
-        perror("ftruncate");
-        exit(EXIT_FAILURE);
-    }
-
-    //creating buffer to read file bytes
-
-    char * buffer = malloc(FILE_SIZE);
-    if (buffer == NULL) {
-        perror("malloc");
-        exit(EXIT_FAILURE);
-    }
-
-
-    //need to use mmap to share sem and mutex
-
-    proc_sem = mmap(NULL, // NULL: è il kernel a scegliere l'indirizzo
-			2*sizeof(sem_t), // dimensione della memory map
+	proc_sem = mmap(NULL, // NULL: è il kernel a scegliere l'indirizzo
+			sizeof(sem_t) * 2, // dimensione della memory map
 			PROT_READ | PROT_WRITE, // memory map leggibile e scrivibile
 			MAP_SHARED | MAP_ANONYMOUS, // memory map condivisibile con altri processi e senza file di appoggio
-			-1,
-			0); // offset nel file
+			-1, 0); // offset nel file
+	CHECK_ERR_MMAP(proc_sem, "mmap")
 
-    res = sem_init(proc_sem, 1, 0);
-    if(res == -1) {
-        perror("sem_init");
-        exit(EXIT_FAILURE);
-    }
+	mutex = proc_sem + 1;
 
-    mutex = proc_sem +1;
+	res = sem_init(proc_sem, 1, 0);
+	CHECK_ERR(res,"sem_init");
 
-    res = sem_init(mutex, 1, 1);
-    if(res == -1) {
-        perror("sem_init");
-        exit(EXIT_FAILURE);
-    }
+	res = sem_init(mutex, 1, 1);
+	CHECK_ERR(res,"sem_init");
 
-    //operations
+	printf("ora avvio la soluzione_A()...\n");
+	soluzioneA();
 
-    char enter;
+	printf("ed ora avvio la soluzione_B()...\n");
+	soluzioneB();
 
-    for(int i = 0; i < N; i++){
-        switch(fork()) {
-            case -1:
-                perror("fork");
-                exit(EXIT_FAILURE);
+	res = sem_destroy(proc_sem);
+	CHECK_ERR(res,"sem_destroy");
+	res = sem_destroy(mutex);
+	CHECK_ERR(res,"sem_destroy");
 
-            case 0:
-                enter = 'A' + (char) i;
+	return 0;
+}
 
-                if(lseek(fd, 0, SEEK_SET) == -1) {
-                    perror("lseek");
-                    exit(EXIT_FAILURE);
-                }
+void soluzioneA(){
+	int fd;
+	int res;
 
-                res = read(fd, buffer, FILE_SIZE);
-                    if(res == -1) {
-                        perror("read");
-                        exit(EXIT_FAILURE);
-                }
+	fd = open("outputA.txt", O_CREAT | O_TRUNC | O_RDWR,  S_IRUSR | S_IWUSR);
+	CHECK_ERR(fd,"open");
 
-				if(lseek(fd, 0, SEEK_SET) == -1) {
-					perror("lseek");
-					exit(EXIT_FAILURE);
+	res = ftruncate(fd, FILE_SIZE);
+	CHECK_ERR(res,"ftruncate");
+
+	char enter;
+	char ch;
+
+	for(int i=0; i<N; i++){
+
+		enter = 'A' + i;
+
+		switch(fork()){
+			case -1:
+				perror("fork");
+				exit(EXIT_FAILURE);
+
+			case 0:
+				while(1){
+
+					res = sem_wait(proc_sem);
+					CHECK_ERR(res,"sem_wait");
+
+					res = sem_wait(mutex);
+					CHECK_ERR(res,"sem_wait");
+					
+					//setto file offset dove il file è = 0
+					for(int i=0; i<FILE_SIZE; i++){
+						res = read(fd, &ch, 1);
+						CHECK_ERR(res,"read");
+						if(ch == 0)
+							break;
+					}
+
+					//non ho trovato posizioni libere;
+					if(lseek(fd, 0, SEEK_CUR) == FILE_SIZE) {
+						res = sem_post(mutex);
+						CHECK_ERR(res,"sem_post");
+
+						exit(EXIT_SUCCESS);
+					}	
+
+					//setto fd di uno indietro perché read ha portato 
+					//avanti di uno rispetto la posizione interessata
+					res = lseek(fd, -1, SEEK_CUR);
+					CHECK_ERR(res,"lseek");
+
+					res = write(fd, &enter, sizeof(enter));
+					CHECK_ERR(res,"write");
+
+					res = sem_post(mutex);
+					CHECK_ERR(res,"sem_post");
 				}
 
-                if(sem_wait(proc_sem) == -1) {
-                    perror("sem_wait");
-                    exit(EXIT_FAILURE);
-                }
+				close(fd);
+				exit(EXIT_SUCCESS);
 
-                for(int j=0; j<FILE_SIZE; j++){
-                    if(buffer[j] == 0) {
-                        buffer[j] = enter;
-                        if(sem_wait(mutex) == -1) {
-                            perror("sem_wait");
-                            exit(EXIT_FAILURE);
-                        }
+				break;
 
-                        //critical seciton
-                        write(fd, &enter, sizeof(enter));
+			default:
+				;	
+		}
+	}
 
-                        if(sem_post(mutex) == -1) {
-                            perror("sem_post");
-                            exit(EXIT_FAILURE);
-                        }
-                    }
-                }
-                exit(0);
+	for(int i=0; i<FILE_SIZE + N; i++){
+		res = sem_post(proc_sem);
+		CHECK_ERR(res,"sem_post");
+	}
 
-            default:
-                for(int i=0; i < FILE_SIZE + N; i++) {
-                    if(sem_post(proc_sem) == -1) {
-                        perror("sem_post");
-                        exit(EXIT_FAILURE);
-                    }
-                }
-
-                if(wait(NULL) == -1){
-                    perror("wait");
-                    exit(EXIT_FAILURE);
-                }
-        }
-    }
+	for(int i=0; i<N; i++){
+		res = wait(NULL);
+		CHECK_ERR(res,"wait");
+	}
 }
 
-void soluzione_B() {   //only using open() and mmap()
-    int res;
-    int fd;
-    char * addr;
+void soluzioneB() {
+	int fd;
+	int res;
+	char * addr;
 
-    fd = open("outputB.txt", O_CREAT | O_TRUNC | O_RDWR,  S_IRUSR | S_IWUSR);
-    if(fd == -1) {
-        perror("open");
-        exit(EXIT_FAILURE);
-    }
+	fd = open("outputB.txt", O_CREAT | O_TRUNC | O_RDWR,  S_IRUSR | S_IWUSR);
+	CHECK_ERR(fd,"open");
 
-    res = ftruncate(fd, FILE_SIZE);
-    if(res == -1) {
-        perror("ftruncate");
-        exit(EXIT_FAILURE);
-    }
+	res = ftruncate(fd, FILE_SIZE);
+	CHECK_ERR(res,"ftruncate");
 
-    //creating shared mmap for file and sem+mutex
+	addr = mmap(NULL, FILE_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+	CHECK_ERR_MMAP(addr,"mmap");
 
-    addr = mmap(NULL, // NULL: è il kernel a scegliere l'indirizzo
-			FILE_SIZE, // dimensione della memory map
-			PROT_READ | PROT_WRITE, // memory map leggibile e scrivibile
-			MAP_SHARED, // memory map condivisibile con altri processi
-			fd,
-			0); // offset nel file
+	close(fd);
 
-    if(addr == MAP_FAILED) {
-        perror("mmap");
-        exit(EXIT_FAILURE);
-    }
+	char enter;
+	int check;
 
-    memset(addr, 0, FILE_SIZE);
+	for(int i=0; i<N; i++){
 
-    proc_sem = mmap(NULL, // NULL: è il kernel a scegliere l'indirizzo
-			2*sizeof(sem_t), // dimensione della memory map
-			PROT_READ | PROT_WRITE, // memory map leggibile e scrivibile
-			MAP_SHARED | MAP_ANONYMOUS, // memory map condivisibile con altri processi e senza file di appoggio
-			-1,
-			0); // offset nel file
+		enter = 'A' + i;
 
-    res = sem_init(proc_sem, 1, 0);
-    if(res == -1) {
-        perror("sem_init");
-        exit(EXIT_FAILURE);
-    }
+		switch(fork()){
+			case -1:
+				perror("fork");
+				exit(EXIT_FAILURE);
 
-    mutex = proc_sem +1;
+			case 0:
+				while(1){
 
-    res = sem_init(mutex, 1, 1);
-    if(res == -1) {
-        perror("sem_init");
-        exit(EXIT_FAILURE);
-    }
+					res = sem_wait(proc_sem);
+					CHECK_ERR(res,"sem_wait");
 
-    //operations
+					res = sem_wait(mutex);
+					CHECK_ERR(res,"sem_wait");
 
-    char enter;
+					check = 0;
 
-    for(int i = 0; i < N; i++){
-        switch(fork()) {
-            case -1:
-                perror("fork");
-                exit(EXIT_FAILURE);
+					for(int i=0; i<FILE_SIZE; i++) {
+						if(addr[i] != 0)
+						check++;
 
-            case 0:
-                enter = 'A' + (char) i;
+						if(addr[i] == 0)
+						break;
+					}
 
-                if(sem_wait(proc_sem) == -1) {
-                    perror("sem_wait");
-                    exit(EXIT_FAILURE);
-                }
+					if(check == FILE_SIZE) {
+						res = sem_post(mutex);
+						CHECK_ERR(res,"sem_post");
 
-                for(int j=0; j<FILE_SIZE; j++){
-                    if(addr[j] == 0) {
-                        if(sem_wait(mutex) == -1) {
-                            perror("sem_wait");
-                            exit(EXIT_FAILURE);
-                        }
+						exit(EXIT_SUCCESS);
+					}
+					else {
+						addr[check] = enter;
+						check++;
+					}
 
-                        //critical seciton
-                        write(fd, &enter, sizeof(enter));
+					res = sem_post(mutex);
+					CHECK_ERR(res,"sem_post");
+				}
 
-                        if(sem_post(mutex) == -1) {
-                            perror("sem_post");
-                            exit(EXIT_FAILURE);
-                        }
-                    }
-                }
-                exit(0);
+				exit(EXIT_SUCCESS);
 
-            default:
-                for(int i=0; i < FILE_SIZE + N; i++) {
-                    if(sem_post(proc_sem) == -1) {
-                        perror("sem_post");
-                        exit(EXIT_FAILURE);
-                    }
-                }
+				break;
 
-                if(wait(NULL) == -1){
-                    perror("wait");
-                    exit(EXIT_FAILURE);
-                }
-        }
-    }
-}
+			default:
+				;	
+		}
+	}
 
-int main() {
-    printf("ora avvio la soluzione_A()...\n");
-    soluzione_A();
+	for(int i=0; i<FILE_SIZE + N; i++){
+		res = sem_post(proc_sem);
+		CHECK_ERR(res,"sem_post");
+	}
 
-    printf("ed ora avvio la soluzione_B()...\n");
-    soluzione_B();
-
-    printf("bye!\n");
-    return 0;
+	for(int i=0; i<N; i++){
+		res = wait(NULL);
+		CHECK_ERR(res,"wait");
+	}
 }
